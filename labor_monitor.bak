@@ -1,0 +1,451 @@
+import time
+import json
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from email.utils import formataddr
+from datetime import datetime
+import sqlite3
+import os
+import requests
+from bs4 import BeautifulSoup
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# ============================================
+# 数据库连接与操作
+# ============================================
+
+# 1. 连接到数据库（如果 labor.db 文件不存在，会自动在当前目录创建一个）
+conn = sqlite3.connect('labor.db')
+cursor = conn.cursor()
+
+# 2. 初始化数据库结构（建表）
+def init_db():
+    # 创建用户表
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            email TEXT UNIQUE NOT NULL,
+            location TEXT,
+            category TEXT,
+            token TEXT UNIQUE NOT NULL
+        )
+    ''')
+    
+    # 创建推送历史表
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS push_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            email TEXT NOT NULL,
+            course_unique_id TEXT NOT NULL,
+            UNIQUE(email, course_unique_id) -- 联合唯一索引，防止同一门课给同一个人存两遍
+        )
+    ''')
+
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS latest_courses (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT,
+            category TEXT,
+            location TEXT,
+            time_info TEXT,
+            status TEXT
+        )
+    ''')
+
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS system_info (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        )
+    ''')
+
+    conn.commit()
+    print("数据库初始化完成！")
+
+
+# 将最新抓取的课程全量覆盖写入数据库
+def update_latest_courses(courses_list):
+    # 先清空旧数据
+    cursor.execute("DELETE FROM latest_courses")
+    # 写入新数据
+    for c in courses_list:
+        cursor.execute('''
+            INSERT INTO latest_courses (name, category, location, time_info, status) 
+            VALUES (?, ?, ?, ?, ?)
+        ''', (c['name'], c['category'], c['location'], c['time'], c['status']))
+
+
+    # 👇 新增：记录当前时间到 system_info 表
+    now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    # REPLACE INTO 的作用是：如果存在就更新，不存在就插入
+    cursor.execute('''
+        REPLACE INTO system_info (key, value) VALUES ('last_update', ?)
+    ''', (now_str,))
+
+    conn.commit()
+    print("-> 已将最新课程快照同步至数据库，供网页读取。")
+
+
+# 3. 添加新订阅用户的函数
+def add_user(email, location, category):
+    try:
+        cursor.execute('''
+            INSERT INTO users (email, location, category) 
+            VALUES (?, ?, ?)
+        ''', (email, location, category))
+        conn.commit()
+        print(f"成功添加用户: {email}")
+    except sqlite3.IntegrityError:
+        print(f"用户 {email} 已经存在了，可以直接执行更新操作。")
+
+# 4. 检查与记录推送历史的函数
+def should_push(email, course_unique_id):
+    """检查是否已经推送过，如果没推送过则记录并返回 True"""
+    cursor.execute('''
+        SELECT 1 FROM push_history WHERE email = ? AND course_unique_id = ?
+    ''', (email, course_unique_id))
+    
+    if cursor.fetchone():
+        return False # 查到了记录，说明发过了，不推送
+    else:
+        # 没发过，插入记录并允许推送
+        cursor.execute('''
+            INSERT INTO push_history (email, course_unique_id) VALUES (?, ?)
+        ''', (email, course_unique_id))
+        conn.commit()
+        return True
+
+
+
+# ==========================================
+# 模块 1：数据层与全局配置
+# ==========================================
+
+# SMTP 邮件发送方配置
+SMTP_CONFIG = {
+    "server": os.getenv("SMTP_SERVER", "smtp.qq.com"), 
+    "port": int(os.getenv("SMTP_PORT", 465)),
+    "user": os.getenv("SMTP_USER"),
+    "auth_code": os.getenv("SMTP_AUTH_CODE")
+}
+
+# 2. 读取工具人账号 (如果没找到，默认返回 None)
+TOOL_ACCOUNT = {
+    "student_id": os.getenv("TOOL_STUDENT_ID"),
+    "password": os.getenv("TOOL_PASSWORD")
+}
+
+# ==========================================
+# 获取所有用户的工具函数
+# ==========================================
+def get_all_users():
+    """从 SQLite 数据库中提取所有订阅用户"""
+    cursor.execute("SELECT email, location, category, token FROM users")
+    return cursor.fetchall()  # 返回格式: [('email1', '九龙湖', '生产'), ('email2',...)]
+
+
+# 抓取间隔（秒）
+CHECK_INTERVAL = 3 * 60
+
+
+# ==========================================
+# 模块 2：通知层 (Notifier)
+# ==========================================
+
+def send_email(to_email, subject, html_content):
+    """
+    发送 HTML 邮件给指定的单个用户
+    """
+    msg = MIMEMultipart()
+    msg['From'] = formataddr(("SEU 选课中心 - Garvofadge", SMTP_CONFIG['user']))
+    msg['To'] = to_email
+    msg['Subject'] = subject
+
+    # 将传入的 HTML 字符串附加到邮件中
+    msg.attach(MIMEText(html_content, 'html', 'utf-8'))
+
+    try:
+        server = smtplib.SMTP_SSL(SMTP_CONFIG['server'], SMTP_CONFIG['port'])
+        server.login(SMTP_CONFIG['user'], SMTP_CONFIG['auth_code'])
+        server.sendmail(SMTP_CONFIG['user'], [to_email], msg.as_string())
+        server.quit()
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] 成功向 {to_email} 发送推送！")
+    except Exception as e:
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] 向 {to_email} 发送失败: {e}")
+
+
+
+# ==========================================
+# 模块 3：提取层 (Scraper) - 基于 Requests 和 BeautifulSoup
+# ==========================================
+
+# 清理文本的辅助函数
+def clean_text(text):
+    return " ".join(text.split()) if text else '无'
+
+
+def fetch_latest_courses(session):
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] 正在请求选课数据...")
+    url = "https://labor.seu.edu.cn/SJItemKaiKe/XuanKe/Index"
+    
+    try:
+        # 1. 发送 HTTP 请求获取网页源码
+        response = session.get(url, timeout=15)
+        response.raise_for_status() # 检查是否返回 200 OK
+    except Exception as e:
+        print(f"网络请求失败，可能是Cookie失效或网络波动: {e}")
+        return []
+
+    # 2. 使用 BeautifulSoup 解析 HTML
+    soup = BeautifulSoup(response.text, 'html.parser')
+    table = soup.find(id='c_app_page_index_XuanKe_table')
+    
+    if not table:
+        print("未找到课程表格，可能是Cookie已过期或系统非开放时间。")
+        return []
+
+    courses = []
+    # 找到 tbody 中的所有行 (排除可能隐藏的行或表头)
+    tbody = table.find('tbody')
+    if not tbody:
+        return []
+        
+    rows = tbody.find_all('tr', class_='c--tr')
+
+    for row in rows:
+        tds = row.find_all('td')
+        if len(tds) < 10:
+            continue
+            
+        col1 = clean_text(tds[0].get_text())
+        col2 = clean_text(tds[1].get_text())
+        
+        # 判断偏移量逻辑 (与原JS一致)
+        offset = 0 if (col1.isdigit() and not col2.isdigit()) else 1
+
+        name = clean_text(tds[2 + offset].get_text())
+        category = clean_text(tds[3 + offset].get_text())
+        
+        # 提取地点（可能在 limit-line 的 span 里）
+        location_td = tds[6 + offset]
+        limit_line = location_td.find(class_='limit-line')
+        location = clean_text(limit_line.get_text() if limit_line else location_td.get_text())
+        
+        time_info = clean_text(tds[7 + offset].get_text())
+        deadline_text = clean_text(tds[8 + offset].get_text())
+        status_text = clean_text(tds[9 + offset].get_text())
+
+        # 👇 终极挖掘：遍历这一行所有的隐藏数据单元格
+        sj_item_id = ""
+        sj_item_kaike_id = ""
+
+        hidden_tds = row.find_all('td-data') 
+        for h_td in hidden_tds:
+            if h_td.get('data-name') == 'SJItemID':
+                sj_item_id = h_td.get('data-value')
+            elif h_td.get('data-name') == 'SJItemKaiKeID':
+                sj_item_kaike_id = h_td.get('data-value')
+
+        courses.append({
+            'unique_id': sj_item_kaike_id,
+            'sj_item_id': sj_item_id,             # 👈 提取出的通用ID
+            'sj_item_kaike_id': sj_item_kaike_id, # 👈 提取出的开课实例ID
+            'name': name,
+            'category': category,
+            'location': location,
+            'time': time_info,
+            'status': status_text,
+            'is_full': '已满' in status_text,
+            'is_expired': '已截止' in deadline_text
+        })
+
+    # 别忘了在这个函数的末尾，把整个网页的 CSRF Token 也取出来
+    token_input = soup.find('input', {'name': '__RequestVerificationToken'})
+    csrf_token = token_input['value'] if token_input else ""
+    
+    # 你可以把 token 作为额外的信息返回，或者干脆把它存进 session headers 里
+    session.headers.update({"__RequestVerificationToken": csrf_token})
+        
+    return courses
+
+
+def auto_enroll(session, course):
+    print(f"🚀 正在抢课：{course['name']} ...")
+    
+    API_URL = "https://labor.seu.edu.cn/SJItemKaiKe/XuanKe/StudentXuanKe" 
+    
+    # 严格按照官方 JS 的格式组装 Payload
+    payload = {
+        "SJItemID": course['sj_item_id'],
+        "SJItemKaiKeID": course['sj_item_kaike_id'],
+        # 如果 Token 没放在 Header 里，通常需要放在表单数据里：
+        "__RequestVerificationToken": session.headers.get("__RequestVerificationToken", "")
+    }
+
+    try:
+        response = session.post(API_URL, data=payload, timeout=5)
+        response.raise_for_status()
+        
+        result = response.json() # 官方的 AJAX 几乎肯定返回 JSON
+        if result.get('Success') is True: # 注意官方代码里是大写的 Success
+            print(f"[{course['name']}] 抢课成功")
+            return True
+        else:
+            print(f"⚠️ 抢课失败: {result.get('Message', '未知原因')}")
+            return False
+            
+    except Exception as e:
+        print(f"❌ 秒杀发包异常: {e}")
+        return False
+
+# ==========================================
+# 模块 4：匹配层 (Matcher) - 已接入 SQLite
+# ==========================================
+def match_and_notify(all_courses):
+    """
+    将爬取到的课程与 SQLite 数据库中的规则进行比对
+    """
+    # 1. 全局粗筛：剔除已满或过期的课
+    available_courses = [c for c in all_courses if not c['is_full'] and not c['is_expired']]
+
+    print(f"-> 过滤已满和截止后：还剩 {len(available_courses)} 门可用课程。")
+    
+    if not available_courses:
+        print("当前没有可用名额的课程。")
+        return
+
+    # 2. 从数据库获取真实订阅用户
+    users = get_all_users()
+    if not users:
+        print("数据库中暂无订阅用户。")
+        return
+
+    # 3. 遍历每一个订阅用户
+    for email, target_location, target_category, user_token in users:
+        courses_to_push_for_this_user = []
+
+        # 4. 遍历可用课程，检查是否符合要求
+        for course in available_courses:
+            match_location = target_location in course['location'] if target_location else True
+            match_category = target_category in course['category'] if target_category else True
+            
+            if match_location and match_category:
+                # 如果没发过，它会自动写入 push_history 表并返回 True
+                if should_push(email, course['unique_id']):
+                    courses_to_push_for_this_user.append(course)
+
+        # 5. 发现新课，组装邮件并发送
+        if courses_to_push_for_this_user:
+            # 提前构造好退订链接和选课系统的登录链接
+            base_url = os.getenv("BASE_URL", "http://127.0.0.1:5000")
+            unsubscribe_link = f"{base_url}/unsubscribe/{user_token}"
+            login_url = "https://labor.seu.edu.cn/SJItemKaiKe/XuanKe/Index"
+            
+            # 1. 邮件头部和主容器（带浅灰色背景和边框）
+            html_body = f"""
+            <div style="max-width: 600px; margin: 0 auto; font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; border: 1px solid #e0e0e0; border-radius: 8px; overflow: hidden; background-color: #f9fbfd;">
+                <div style="background-color: #198754; color: white; padding: 20px; text-align: center;">
+                    <h2 style="margin: 0;">🎯 发现新课程！</h2>
+                </div>
+                <div style="padding: 30px;">
+                    <p style="font-size: 16px; color: #333; margin-top: 0;">你好！系统为你监控到了符合要求的新课程：</p>
+                    
+                    <div style="background-color: #e9ecef; padding: 12px; border-radius: 4px; margin-bottom: 20px;">
+                        <span style="font-size: 14px; color: #555;">🔍 <b>当前规则：</b> {target_location or '不限校区'} | {target_category or '不限类别'}</span>
+                    </div>
+                    
+                    <div>
+            """
+            
+            # 2. 遍历课程，为每一门课生成一个精美的“白底左侧蓝边”小卡片
+            for c in courses_to_push_for_this_user:
+                html_body += f"""
+                        <div style="background-color: white; border-left: 4px solid #0d6efd; padding: 15px; margin-bottom: 15px; border-radius: 4px; box-shadow: 0 1px 3px rgba(0,0,0,0.1);">
+                            <h4 style="margin: 0 0 10px 0; color: #0d6efd; font-size: 16px;">{c['name']}</h4>
+                            <p style="margin: 5px 0; font-size: 14px; color: #555;">🏷️ <b>类别：</b> {c['category']}</p>
+                            <p style="margin: 5px 0; font-size: 14px; color: #555;">📍 <b>地点：</b> {c['location']}</p>
+                            <p style="margin: 5px 0; font-size: 14px; color: #555;">⏰ <b>时间：</b> {c['time']}</p>
+                        </div>
+                """
+                
+            # 3. 邮件底部：行动召唤按钮 (CTA) 和 退订链接
+            html_body += f"""
+                    </div>
+                    <div style="text-align: center; margin: 30px 0;">
+                        <a href="{login_url}" style="display: inline-block; padding: 12px 25px; background-color: #0d6efd; color: white; text-decoration: none; border-radius: 5px; font-size: 16px; font-weight: bold;">立即前往系统选课</a>
+                    </div>
+                    
+                    <hr style="border: 0; border-top: 1px solid #eee; margin: 20px 0;">
+                    
+                    <div style="text-align: center;">
+                        <p style="font-size: 12px; color: #999; margin-bottom: 5px;">如果你已选满课程或不再需要接收此类提醒，请点击下方链接：</p>
+                        <a href="{unsubscribe_link}" style="color: #dc3545; font-size: 12px; text-decoration: underline;">一键取消订阅</a>
+                    </div>
+                </div>
+            </div>
+            """
+
+            # 发送邮件（稍微优化了标题，加上了课程数量）
+            send_email(email, f"【SEU选课提醒】发现 {len(courses_to_push_for_this_user)} 门新课程", html_body)
+
+
+# ==========================================
+# 模块 5：调度层 (Scheduler)
+# ==========================================
+def main_loop():
+    if not os.path.exists("auth_state.json"):
+        print("❌ 致命错误：找不到 auth_state.json 文件！")
+        print("请先在本地运行登录脚本生成凭证，并放到该目录下。")
+        return
+    
+    # 👇 修复 1：补上缺失的 Session 创建步骤，并伪装请求头
+    session = requests.Session()
+    session.headers.update({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+    })
+
+    # 2. 读取 Playwright 导出的 Cookie JSON，并塞入 Requests 的 Session 中
+    try:
+        with open("auth_state.json", 'r', encoding='utf-8') as f:
+            state = json.load(f)
+            
+        cookies_loaded = 0
+        for c in state.get('cookies', []):
+            session.cookies.set(c['name'], c['value'], domain=c['domain'], path=c['path'])
+            cookies_loaded += 1
+        print(f"✅ 成功加载凭证！共读取到 {cookies_loaded} 个 Cookie。")
+    except Exception as e:
+        print(f"❌ 读取 auth_state.json 失败: {e}")
+        return
+    
+    # 开启无限循环，定时抓取
+    while True:
+        # 👇 修复 2：去掉 await，并且把之前残留的 page 换成刚才创建的 session
+        current_courses = fetch_latest_courses(session)
+
+        print(f"-> 网页解析完毕：共抓取到 {len(current_courses)} 门课程数据。")
+
+        if current_courses:
+            update_latest_courses(current_courses)
+            match_and_notify(current_courses)
+        
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] 本轮处理完毕，休眠 {CHECK_INTERVAL/60} 分钟...")
+        # 👇 修复 3：将 asyncio.sleep 换成普通的 time.sleep
+        time.sleep(CHECK_INTERVAL)
+
+# ==========================================
+# 统一的程序入口 (Main)
+# ==========================================
+if __name__ == "__main__":
+    # 初始化数据库表结构
+    init_db()
+    
+    # 启动异步爬虫主循环
+    try:
+        main_loop()
+    except KeyboardInterrupt:
+        print("\n程序被手动中断，正在安全关闭数据库...")
+        conn.close()

@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>东南大学劳动教育订阅大厅</title>
+    <link href="{{ url_for('static', filename='bootstrap.min.css') }}" rel="stylesheet">
+</head>
+<body class="bg-light">
+
+<div class="container py-5">
+    <div class="row mb-4 text-center">
+        <h1 class="display-5 fw-bold text-primary">SEU 劳动教育课程提醒订阅</h1>
+    </div>
+
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% if messages %}
+        {% for category, message in messages %}
+          <div class="alert alert-{{ category }} alert-dismissible fade show" role="alert">
+            {{ message }}
+            <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+          </div>
+        {% endfor %}
+      {% endif %}
+    {% endwith %}
+
+    <div class="row g-4">
+
+        <div class="col-md-4">
+            <div class="card shadow-sm border-0 rounded-3 mb-4">
+                <div class="card-header bg-primary bg-gradient text-white py-3 rounded-top-3">
+                    <h5 class="card-title mb-0 fw-bold">
+                        <i class="bi bi-envelope-plus"></i> 📬 新增邮件订阅
+                    </h5>
+                </div>
+                <div class="card-body p-4">
+                    <form action="/subscribe" method="POST">
+                        <div class="mb-3">
+                            <label class="form-label fw-bold text-secondary small">接收邮箱</label>
+                            <div class="input-group">
+                                <span class="input-group-text bg-light border-end-0">📧</span>
+                                <input type="email" name="email" class="form-control border-start-0 ps-0" placeholder="如: xxx@foxmail.com" required>
+                            </div>
+                        </div>
+                        
+                        <div class="mb-3">
+                            <label class="form-label fw-bold text-secondary small">目标校区</label>
+                            <select name="location" class="form-select border-light-subtle shadow-sm">
+                                <option value="" class="text-muted">不限校区</option>
+                                <option value="九龙湖校区">📍 九龙湖校区</option>
+                                <option value="四牌楼校区">📍 四牌楼校区</option>
+                                <option value="丁家桥校区">📍 丁家桥校区</option>
+                            </select>
+                        </div>
+                        
+                        <div class="mb-4">
+                            <label class="form-label fw-bold text-secondary small">劳动类别</label>
+                            <select name="category" class="form-select border-light-subtle shadow-sm">
+                                <option value="" class="text-muted">不限类别</option>
+                                <option value="生产劳动">🛠️ 生产劳动</option>
+                                <option value="生活劳动">🧹 生活劳动</option>
+                                <option value="服务劳动">🤝 服务劳动</option>
+                            </select>
+                        </div>
+                        
+                        <button type="submit" class="btn btn-primary w-100 fw-bold py-2 shadow-sm rounded-pill">
+                            🚀 立即开启监控
+                        </button>
+                    </form>
+                </div>
+            </div>
+
+            <div class="card shadow-sm border-0 rounded-3">
+                <div class="card-header bg-secondary bg-gradient text-white py-3 rounded-top-3 d-flex justify-content-between align-items-center">
+                    <h5 class="card-title mb-0 fw-bold">⚙️ 监控队列</h5>
+                    <span class="badge bg-light text-secondary rounded-pill">{{ users_list|length }} 人在列</span>
+                </div>
+                
+                <div class="card-body p-0" style="max-height: 350px; overflow-y: auto;">
+                    <ul class="list-group list-group-flush rounded-bottom-3">
+                        {% for user in users_list %}
+                        <li class="list-group-item d-flex justify-content-between align-items-start py-3">
+                            <div class="ms-2 me-auto text-truncate">
+                                <div class="fw-bold text-dark mb-1">
+                                    👤 {{ user.masked_email if user.masked_email else user.email }}
+                                </div>
+                                <div class="d-flex gap-2">
+                                    <span class="badge {{ 'bg-info text-dark' if user.location else 'bg-light text-muted border' }} fw-normal" style="font-size: 0.75rem;">
+                                        {{ user.location or '不限校区' }}
+                                    </span>
+                                    <span class="badge {{ 'bg-warning text-dark' if user.category else 'bg-light text-muted border' }} fw-normal" style="font-size: 0.75rem;">
+                                        {{ user.category or '不限类别' }}
+                                    </span>
+                                </div>
+                            </div>
+                            <span class="d-flex align-items-center mt-1">
+                                <span class="spinner-grow spinner-grow-sm text-success" style="width: 0.6rem; height: 0.6rem;" role="status">
+                                    <span class="visually-hidden">监控中</span>
+                                </span>
+                            </span>
+                        </li>
+                        {% else %}
+                        <li class="list-group-item text-center py-5">
+                            <div class="text-muted">
+                                <span style="font-size: 2rem;">📭</span>
+                                <p class="mt-2 mb-0">暂无订阅数据</p>
+                                <small>成为第一个吃螃蟹的人吧！</small>
+                            </div>
+                        </li>
+                        {% endfor %}
+                    </ul>
+                </div>
+            </div>
+        </div>
+
+        <style>
+            /* Webkit browsers (Chrome, Safari, Edge) */
+            .card-body::-webkit-scrollbar {
+                width: 6px;
+            }
+            .card-body::-webkit-scrollbar-track {
+                background: #f1f1f1; 
+                border-radius: 4px;
+            }
+            .card-body::-webkit-scrollbar-thumb {
+                background: #c1c1c1; 
+                border-radius: 4px;
+            }
+            .card-body::-webkit-scrollbar-thumb:hover {
+                background: #a8a8a8; 
+            }
+        </style>
+
+        <div class="col-md-8">
+            <div class="card shadow-sm border-0 h-100 rounded-3">
+                <div class="card-header bg-success text-white d-flex justify-content-between align-items-center py-3 rounded-top-3">
+                    <h5 class="card-title mb-0 fw-bold">📊 实时课程大厅</h5>
+                    <span class="badge bg-white text-success shadow-sm" style="font-size: 0.85rem;">
+                        ⏱️ 最后更新: {{ last_update_time }}
+                    </span>
+                </div>
+                
+                <div class="card-body p-0" style="overflow-x: auto;">
+                    <table class="table table-hover table-striped align-middle mb-0">
+                        <thead class="table-light text-muted">
+                            <tr>
+                                <th class="ps-4">项目名称</th>
+                                <th>🏷️ 类别</th>
+                                <th>📅 周次</th> 
+                                <th>📍 地点</th>
+                                <th>⏰ 时间</th>
+                                <th class="text-center">状态</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for course in courses %}
+                            <tr>
+                                <td class="ps-4 fw-bold text-dark">{{ course.name }}</td>
+                                
+                                <td>
+                                    <span class="badge bg-light text-secondary border">{{ course.category }}</span>
+                                </td>
+                                
+                                <td class="text-primary fw-bold" style="font-size: 0.9rem;">
+                                    {{ course.week }}
+                                </td>
+                                
+                                <td class="text-muted"><small>{{ course.location }}</small></td>
+                                <td class="text-muted"><small>{{ course.time_info }}</small></td>
+                                
+                                <td class="text-center">
+                                    {% if '已满' in course.status or '截止' in course.status %}
+                                        <span class="badge rounded-pill bg-danger bg-opacity-75 fw-normal px-2 py-1">
+                                            {{ course.status }}
+                                        </span>
+                                    {% else %}
+                                        <span class="badge rounded-pill bg-success shadow-sm px-3 py-2 fs-6">
+                                            {{ course.status }}
+                                        </span>
+                                    {% endif %}
+                                </td>
+                            </tr>
+                            {% else %}
+                            <tr>
+                                <td colspan="6" class="text-center py-5">
+                                    <div class="text-muted mt-3">
+                                        <span style="font-size: 3rem;">📭</span>
+                                        <p class="mt-3 mb-1 fw-bold text-dark">宁静的校园，暂无课程数据...</p>
+                                        <small>秒杀爬虫正在后台潜伏监控中，有新课将立即呈现</small>
+                                    </div>
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script src="{{ url_for('static', filename='bootstrap.bundle.min.js') }}"></script>
+</body>
+</html>
