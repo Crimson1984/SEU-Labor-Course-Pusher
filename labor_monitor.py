@@ -405,11 +405,11 @@ def match_and_notify(all_courses):
 
 # 👇 配置你的抢课账号与目标 (请确保同目录下有对应的 JSON 文件)
 USER_TARGETS = {
-    "crimson": {
-        "auth_file": "auth_state.json", 
-        "categories": ["服务劳动"], # 该账号想抢的类别
-        "quota": 1 # 抢满 1 门就停手
-    },
+    # "crimson": {
+    #     "auth_file": "auth_state.json", 
+    #     "categories": ["服务劳动"], # 该账号想抢的类别
+    #     "quota": 1 # 抢满 1 门就停手
+    # },
     # 你可以继续解除下面这行的注释，添加更多同学
     # "李四(同学)": { "auth_file": "auth_lisi.json", "categories": ["生产劳动", "服务劳动", "生活劳动"], "quota": 2 }
 }
